@@ -1,0 +1,12 @@
+# 统一换行符，避免 Windows 上 VBS/Python 被改成 LF 后行为异常
+* text=auto
+
+*.vbs text eol=crlf
+*.bat text eol=crlf
+*.py  text eol=lf
+*.md  text eol=lf
+*.json text eol=lf
+
+# 这些是二进制/运行时文件，不做文本转换
+*.png binary
+*.ico binary

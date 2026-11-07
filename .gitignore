@@ -1,0 +1,21 @@
+# 运行时数据现在放在 %APPDATA%\workbuddy-codebuddy-chat-sync\，不在项目目录里。
+# 下面两条是给老版本目录结构留的保险，防止误提交。
+data/
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,9 @@
+{
+  "_说明": "通常不需要这个文件。程序会自动扫出所有账号，并从软件日志里读取昵称。只有想手动改名时才用：把内容复制到 %APPDATA%\\workbuddy-codebuddy-chat-sync\\config.json，把账号ID换成真的",
+  "accounts": {
+    "在这里填账号ID": "想显示的名字"
+  },
+  "auto_sync": true,
+  "interval_seconds": 120,
+  "merge_history_files": true
+}
