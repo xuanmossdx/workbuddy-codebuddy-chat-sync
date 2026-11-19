@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-workbuddy-codebuddy-chat-sync 托盘程序
+workbuddy-codebuddy-chat-sync 托盘程序 + 管理窗口
 
-常驻右下角通知区域，右键出菜单：
-- 实时显示 WorkBuddy / CodeBuddy 各自有哪些账号、各多少条
-- 两个软件分别指定归到哪个账号（允许登录不同号）
-- 每 interval_seconds 秒自动同步一次
-- 所有操作都会弹气泡反馈
+启动后打开管理窗口，常驻右下角通知区域：
+- 分别列出 WorkBuddy / CodeBuddy 识别到的账号、会话数和当前生效账号
+- 一键把某个软件的历史会话归到指定账号
+- 显示上次同步时间与结果，可立即同步、查看日志
+- 关闭窗口只最小化到托盘；每 interval_seconds 秒自动同步一次
 
-启动：pythonw src/tray.py
+启动：pythonw src/tray.py（加 --tray 则只启动托盘，不弹窗口）
 """
 import msvcrt
 import os
@@ -20,6 +20,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sync_core as core  # noqa: E402
+import ui  # noqa: E402
 
 try:
     import pystray
@@ -52,6 +53,7 @@ except ImportError:
 LOCK_PATH = os.path.join(core.DATA_DIR, "tray.lock")
 
 state = {"auto": True}
+app = None  # ui.App，在 main() 里创建
 
 
 def make_image():
@@ -93,13 +95,13 @@ def launch_command():
     打包成 exe 后被调用的就是自己；从源码跑则拼 pythonw + tray.py。
     """
     if getattr(sys, "frozen", False):
-        return '"%s"' % sys.executable
+        return '"%s" --tray' % sys.executable
     pyw = sys.executable
     if pyw.lower().endswith("python.exe"):
         cand = pyw[: -len("python.exe")] + "pythonw.exe"
         if os.path.exists(cand):
             pyw = cand
-    return '"%s" "%s"' % (pyw, os.path.abspath(__file__))
+    return '"%s" "%s" --tray' % (pyw, os.path.abspath(__file__))
 
 
 def _read_run_value():
@@ -178,6 +180,8 @@ def build_account_menu(product):
 
 def build_menu():
     return pystray.Menu(
+        pystray.MenuItem("打开管理窗口", open_window, default=True),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem(lambda i: status_text("WorkBuddy", "wb"), None, enabled=False),
         pystray.MenuItem(lambda i: status_text("CodeBuddy", "cb"), None, enabled=False),
         pystray.Menu.SEPARATOR,
@@ -211,6 +215,19 @@ def _notify(icon, msg):
         pass
 
 
+def _post_ui(fn):
+    """把托盘线程的动作切回 Tk 主线程执行。"""
+    if app is not None:
+        try:
+            app.post(fn)
+        except Exception:
+            pass
+
+
+def open_window(icon, item):
+    _post_ui(lambda: app and app.show())
+
+
 def _refresh(icon):
     """重建整个菜单，这样新登录的账号也能立刻出现在子菜单里"""
     try:
@@ -225,27 +242,34 @@ def _refresh(icon):
 
 def do_force(icon, product, uid):
     try:
-        msg = core.sync(product=product, target=uid)
+        with ui.SYNC_LOCK:
+            msg = core.sync(product=product, target=uid)
         core.log(msg)
     except Exception:
         msg = "操作失败：%s" % traceback.format_exc(limit=1)
         core.log(msg)
+    ui.record_last_sync(msg, "托盘切换")
     _notify(icon, msg)
     _refresh(icon)
+    _post_ui(lambda: app and app.external_sync_done(msg))
 
 
 def do_sync_once(icon, item):
     try:
-        msg = core.sync()
+        with ui.SYNC_LOCK:
+            msg = core.sync()
     except Exception as e:
         msg = "同步失败：%s" % e
+    ui.record_last_sync(msg, "托盘同步")
     _notify(icon, msg)
     _refresh(icon)
+    _post_ui(lambda: app and app.external_sync_done(msg))
 
 
 def toggle_auto(icon, item):
     state["auto"] = not state["auto"]
     _notify(icon, "自动同步已%s" % ("开启" if state["auto"] else "关闭"))
+    _post_ui(lambda: app and app.set_auto_state(state["auto"]))
     _refresh(icon)
 
 
@@ -270,7 +294,11 @@ def open_config(icon, item):
 
 
 def quit_app(icon, item):
-    icon.stop()
+    try:
+        icon.stop()
+    except Exception:
+        pass
+    _post_ui(lambda: app and app.shutdown())
 
 
 # ---------------------------------------------------------------- 后台循环
@@ -284,7 +312,10 @@ def ticker():
     while True:
         if state["auto"]:
             try:
-                core.sync()
+                with ui.SYNC_LOCK:
+                    msg = core.sync()
+                ui.record_last_sync(msg, "自动同步")
+                _post_ui(lambda: app and app.on_auto_sync())
             except Exception:
                 core.log("定时同步异常：" + traceback.format_exc())
         interval = int(core.load_config().get("interval_seconds") or 120)
@@ -309,13 +340,30 @@ def already_running_hint():
 
         ctypes.windll.user32.MessageBoxW(
             0,
-            "同步托盘已经在运行了。\n\n"
-            "请看屏幕右下角的通知区域，\n"
-            "如果没直接看到，点一下那里的 ∧ 箭头展开，\n"
-            "找到一个蓝色的圆形图标，右键它就能切换账号。",
+            "同步程序已经在运行了。\n\n"
+            "请右键任务栏通知区域里的蓝色圆形图标，\n"
+            "选择「打开管理窗口」。\n\n"
+            "如果没直接看到图标，点一下那里的 ∧ 箭头展开。",
             "账号记录同步",
             0x40,
         )
+    except Exception:
+        pass
+
+
+def enable_dpi_awareness():
+    """让窗口在高分屏上不发虚。必须在创建 Tk 之前调用。"""
+    try:
+        import ctypes
+
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        return
+    except Exception:
+        pass
+    try:
+        import ctypes
+
+        ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
 
@@ -326,24 +374,52 @@ def main():
         already_running_hint()
         return
     state["auto"] = bool(core.load_config().get("auto_sync", True))
-    core.log("托盘程序启动")
+    core.log("程序启动")
     fix_autostart_path()
+    enable_dpi_awareness()
+
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.withdraw()
+
+    global app
+    app = ui.App(root, icon_image=make_image(), auto_enabled=state["auto"])
 
     icon = pystray.Icon(
         "workbuddy_codebuddy_chat_sync", make_image(), "账号记录同步", build_menu()
     )
+    app.on_minimized = lambda: _notify(
+        icon, "程序仍在托盘运行，后台同步不受影响。"
+    )
 
-    def setup(i):
-        # 关键：pystray 传入自定义 setup 时，必须自己把图标设为可见，
-        # 否则图标不会出现在通知区域（默认的 setup 才会自动设 True）
+    def run_icon():
+        def setup(i):
+            # 关键：pystray 传入自定义 setup 时，必须自己把图标设为可见，
+            # 否则图标不会出现在通知区域（默认的 setup 才会自动设 True）
+            try:
+                i.visible = True
+                core.log("图标已显示 visible=%s" % i.visible)
+            except Exception:
+                core.log("设置图标可见失败：" + traceback.format_exc())
+            threading.Thread(target=ticker, daemon=True).start()
+
+        icon.run(setup=setup)
+
+    threading.Thread(target=run_icon, daemon=True).start()
+
+    if "--tray" in sys.argv or "--minimized" in sys.argv:
+        core.log("以托盘模式启动，不弹出管理窗口")
+    else:
+        app.show()
+
+    try:
+        root.mainloop()
+    finally:
         try:
-            i.visible = True
-            core.log("图标已显示 visible=%s" % i.visible)
+            icon.stop()
         except Exception:
-            core.log("设置图标可见失败：" + traceback.format_exc())
-        threading.Thread(target=ticker, daemon=True).start()
-
-    icon.run(setup=setup)
+            pass
 
 
 if __name__ == "__main__":

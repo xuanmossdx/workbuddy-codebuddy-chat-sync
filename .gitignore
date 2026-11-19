@@ -19,3 +19,12 @@ venv/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 构建产物
+dist/
+
+# 本地调研存档（含本机账号信息，不入库）
+2026-11-18/
+
+# 旧版本与本地备份
+*.bak-*
