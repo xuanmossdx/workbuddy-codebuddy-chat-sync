@@ -40,6 +40,9 @@ DEFAULT_SETTINGS = {
         "exePath": None,
         "accountsRoot": None,
     },
+    "trae": {
+        "instanceRoots": [],
+    },
     "launch": {
         "loginTimeoutSec": 1200,
         "pollIntervalSec": 2,
@@ -164,10 +167,7 @@ def default_root():
     env = os.environ.get("WB_ACCOUNTS_ROOT")
     if env:
         return Path(env).expanduser()
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        return Path(local) / "WorkBuddyAccounts"
-    return Path.home() / ".workbuddy-accounts"
+    return app_base_dir() / "accounts"
 
 
 def detect_exe():
@@ -370,7 +370,7 @@ def launch_workbuddy(exe, config_dir):
 # ================================================================ 桌面入口
 
 def desktop_dir():
-    """当前用户的桌面目录（跟随 OneDrive/系统重定向，不写死 C:\\Users\\...）。"""
+    """当前用户的桌面目录（跟随 OneDrive/系统重定向，不写死用户目录）。"""
     try:
         import winreg
 
@@ -405,9 +405,12 @@ def _save_shortcuts(data):
 
 
 def _powershell_exe():
-    root = os.environ.get("SystemRoot") or r"C:\Windows"
-    candidate = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    return candidate if candidate.is_file() else Path("powershell.exe")
+    root = os.environ.get("SystemRoot")
+    if root:
+        candidate = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if candidate.is_file():
+            return candidate
+    return Path("powershell.exe")
 
 
 def create_desktop_shortcut(uid, label, launcher, exe, config_dir):
@@ -1322,8 +1325,26 @@ def trae_default_dir():
     return Path(appdata) / "Trae CN" if appdata else None
 
 
+def trae_instance_roots():
+    """Trae 多开实例的根目录列表：配置 > 环境变量 > 程序同级 instances。"""
+    roots = []
+    cfg = ensure_settings()
+    for item in (cfg.get("trae") or {}).get("instanceRoots") or []:
+        text = str(item or "").strip()
+        if text:
+            roots.append(Path(text).expanduser())
+    env = os.environ.get("WB_CB_TRAE_ROOTS")
+    if env:
+        for part in env.split(os.pathsep):
+            part = part.strip()
+            if part:
+                roots.append(Path(part).expanduser())
+    roots.append(app_base_dir() / "instances")
+    return roots
+
+
 def trae_instance_dirs():
-    """默认实例 + 常见多开目录；只返回确实有 storage.json 的目录。"""
+    """默认实例 + 多开目录；只返回确实有 storage.json 的目录。"""
     candidates = []
     default = trae_default_dir()
     if default:
@@ -1334,10 +1355,7 @@ def trae_instance_dirs():
             part = part.strip()
             if part:
                 candidates.append(Path(part))
-    for base in (
-        Path(r"D:\workbuddy\instances"),
-        Path.home() / "workbuddy" / "instances",
-    ):
+    for base in trae_instance_roots():
         try:
             if base.is_dir():
                 for child in sorted(base.iterdir()):

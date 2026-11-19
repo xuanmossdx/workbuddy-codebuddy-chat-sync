@@ -6,7 +6,7 @@ r"""WorkBuddy 多账号管理 · 命令行外壳
 
 用法（在项目根目录执行）：
   python .\src\wb_accounts.py detect
-  python .\src\wb_accounts.py add [--label 账号-01] [--root D:\\path] [--timeout 1200]
+  python .\src\wb_accounts.py add [--label 账号-01] [--root .\accounts] [--timeout 1200]
   python .\src\wb_accounts.py switch wb-01
   python .\src\wb_accounts.py stop wb-01 [--force]
   python .\src\wb_accounts.py list
