@@ -413,6 +413,38 @@ def _powershell_exe():
     return Path("powershell.exe")
 
 
+def shortcut_status(uid):
+    """返回桌面入口状态：{path, exists, label}。"""
+    uid = str(uid or "").lower()
+    data = _load_shortcuts()
+    entry = data.get(uid) if isinstance(data.get(uid), dict) else {}
+    # shortcuts.json 可能用原始大小写 uid 做 key
+    if not entry:
+        for key, value in data.items():
+            if str(key).lower() == uid and isinstance(value, dict):
+                entry = value
+                break
+    path = str(entry.get("path") or "")
+    exists = bool(path and Path(path).is_file())
+    return {
+        "path": path if exists else (path or ""),
+        "exists": exists,
+        "label": entry.get("label") or "",
+    }
+
+
+def reveal_desktop_shortcut(path):
+    """在资源管理器中选中该快捷方式，方便用户看见入口。"""
+    target = Path(path)
+    if not target.is_file():
+        raise RuntimeError("快捷方式不存在：%s" % path)
+    subprocess.Popen(
+        ["explorer", "/select,%s" % str(target)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return str(target)
+
+
 def create_desktop_shortcut(uid, label, launcher, exe, config_dir):
     """为实例创建/更新桌面入口。
 
@@ -420,6 +452,7 @@ def create_desktop_shortcut(uid, label, launcher, exe, config_dir):
     同一 uid 重复调用只更新原入口；标签变化时改名并清理旧文件；
     遇到同名的非本工具快捷方式不覆盖，自动追加序号。
     """
+    uid = str(uid or "").lower()
     launcher = Path(launcher)
     config_dir = Path(config_dir)
     if not launcher.is_file():
@@ -430,11 +463,24 @@ def create_desktop_shortcut(uid, label, launcher, exe, config_dir):
         raise RuntimeError("桌面目录不存在：%s" % desktop)
 
     data = _load_shortcuts()
-    entry = data.get(uid) if isinstance(data.get(uid), dict) else {}
+    entry = {}
+    old_key = uid
+    for key, value in data.items():
+        if str(key).lower() == uid and isinstance(value, dict):
+            entry = value
+            old_key = key
+            break
     old_path = Path(entry["path"]) if entry.get("path") else None
 
     base_name = "WorkBuddy - %s" % _safe_shortcut_name(label)
     target = desktop / (base_name + ".lnk")
+    if old_path and old_path.is_file():
+        # 已有本工具登记的入口：原地更新，避免无意义地改名
+        try:
+            if old_path.resolve().parent == desktop.resolve():
+                target = old_path
+        except Exception:
+            target = old_path
     if target.exists() and (old_path is None or target.resolve() != old_path.resolve()):
         # 同名文件不是本工具为这个账号登记的入口：不覆盖，换一个可用名字
         n = 2
@@ -483,6 +529,8 @@ def create_desktop_shortcut(uid, label, launcher, exe, config_dir):
         except OSError:
             pass
 
+    if old_key in data and old_key != uid:
+        data.pop(old_key, None)
     data[uid] = {
         "path": str(target),
         "label": label,
@@ -490,6 +538,154 @@ def create_desktop_shortcut(uid, label, launcher, exe, config_dir):
     }
     _save_shortcuts(data)
     return str(target)
+
+
+def pending_shortcut_key(config_dir):
+    """未登录实例在 shortcuts.json 里的临时 key。"""
+    return "pending:%s" % Path(config_dir).name.lower()
+
+
+def drop_shortcut_key(key, delete_file=True):
+    """删除 shortcuts 登记；可选同时删掉对应 .lnk（仅本工具登记的）。"""
+    key = str(key or "")
+    data = _load_shortcuts()
+    entry = None
+    real_key = None
+    for k, value in list(data.items()):
+        if str(k).lower() == key.lower() and isinstance(value, dict):
+            entry = value
+            real_key = k
+            break
+    if real_key is None:
+        return
+    path = entry.get("path") if entry else None
+    data.pop(real_key, None)
+    _save_shortcuts(data)
+    if delete_file and path:
+        try:
+            p = Path(path)
+            if p.is_file():
+                p.unlink()
+        except OSError:
+            pass
+
+
+def ensure_instance_shortcut(config_dir, label, exe=None, key=None, reveal=False):
+    """不依赖账号表：只要有实例目录就能建/更新桌面入口。"""
+    config_dir = Path(config_dir)
+    if not config_dir.is_dir():
+        return {"ok": False, "message": "账号目录不存在：%s" % config_dir, "path": ""}
+
+    cfg = ensure_settings()
+    exe_value = exe or cfg["workbuddy"].get("exePath") or ""
+    exe_path = Path(exe_value) if exe_value else None
+    if not exe_path or not exe_path.is_file():
+        return {"ok": False, "message": "未找到 WorkBuddy 可执行文件", "path": ""}
+
+    name = label or ("待登录-%s" % config_dir.name)
+    key = key or pending_shortcut_key(config_dir)
+    try:
+        launcher = build_launcher(exe_path, config_dir)
+        path = create_desktop_shortcut(key, name, launcher, exe_path, config_dir)
+    except Exception as exc:
+        return {"ok": False, "message": str(exc), "path": ""}
+
+    if reveal:
+        try:
+            reveal_desktop_shortcut(path)
+        except Exception:
+            pass
+    return {"ok": True, "path": path, "message": "桌面入口：%s" % path, "key": key}
+
+
+def ensure_desktop_entry(uid, label=None, reveal=False):
+    """确保已登记账号有可用桌面入口：缺启动器则生成，缺/坏快捷方式则重建。"""
+    account = find_account(uid)
+    if not account:
+        # 允许 pending:wb-xx 这类临时 key 走实例入口
+        if str(uid).lower().startswith("pending:"):
+            cfg = ensure_settings()
+            root = Path(cfg["workbuddy"]["accountsRoot"]).expanduser()
+            name = str(uid).split(":", 1)[-1]
+            return ensure_instance_shortcut(
+                root / name, label=label, key=str(uid).lower(), reveal=reveal
+            )
+        return {"ok": False, "message": "账号未登记，请先刷新列表", "path": ""}
+
+    name = (
+        label
+        or account.get("nickname")
+        or account.get("label")
+        or (str(account.get("accountUid") or "")[:8] or "未命名账号")
+    )
+    return ensure_instance_shortcut(
+        account.get("configDir"),
+        label=name,
+        exe=account.get("clientExe"),
+        key=account.get("accountUid") or uid,
+        reveal=reveal,
+    )
+
+
+def repair_missing_shortcuts():
+    """补建：已登记账号缺入口，以及未登录的 pending 实例目录。"""
+    repaired = []
+    errors = []
+    for account in load_registry().get("accounts") or []:
+        uid = account.get("accountUid")
+        if not uid:
+            continue
+        status = shortcut_status(uid)
+        if status["exists"]:
+            continue
+        result = ensure_desktop_entry(uid)
+        if result.get("ok"):
+            repaired.append(result.get("path") or uid)
+        else:
+            errors.append("%s：%s" % (
+                account.get("label") or uid[:8],
+                result.get("message") or "失败",
+            ))
+
+    for config_dir in list_pending_account_dirs():
+        key = pending_shortcut_key(config_dir)
+        if shortcut_status(key)["exists"]:
+            continue
+        result = ensure_instance_shortcut(
+            config_dir, label="待登录-%s" % config_dir.name, key=key
+        )
+        if result.get("ok"):
+            repaired.append(result.get("path") or key)
+        else:
+            errors.append("%s：%s" % (config_dir.name, result.get("message") or "失败"))
+    return {"repaired": repaired, "errors": errors}
+
+
+def list_pending_account_dirs():
+    """已建目录/启动器但尚未写入 accounts.json 的实例。"""
+    cfg = ensure_settings()
+    root = Path(cfg["workbuddy"].get("accountsRoot") or "").expanduser()
+    if not root.is_dir():
+        return []
+    registered = set()
+    for a in load_registry().get("accounts") or []:
+        try:
+            registered.add(str(Path(str(a.get("configDir") or "")).resolve()).lower())
+        except Exception:
+            continue
+    out = []
+    for p in sorted(root.iterdir()):
+        if not p.is_dir() or not ACCOUNT_DIR_RE.match(p.name):
+            continue
+        if not (p / LAUNCHER_NAME).is_file():
+            continue
+        try:
+            if str(p.resolve()).lower() in registered:
+                continue
+        except Exception:
+            continue
+        out.append(p)
+    return out
 
 
 # ================================================================ 身份与登录态
@@ -632,29 +828,98 @@ def pid_alive(pid):
     return bool(ok) and code.value == STILL_ACTIVE
 
 
-def workbuddy_processes(exe):
-    if not exe:
-        return {}
+# 进程查询缓存：PowerShell 冷启动很贵，短时复用同一次 CIM 结果。
+_PROC_CACHE = {"ts": 0.0, "key": frozenset(), "rows": []}
+_PROC_CACHE_TTL = 2.5
+_PROC_CACHE_LOCK = threading.Lock()
+
+
+def _query_win32_processes(names):
+    """一次 CIM 查询多个进程名，返回 {pid,name,path,cmd} 列表。"""
+    cleaned = []
+    seen = set()
+    for name in names or []:
+        text = str(name or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    if not cleaned or os.name != "nt":
+        return []
+
+    cache_key = frozenset(n.lower() for n in cleaned)
+    now = time.time()
+    with _PROC_CACHE_LOCK:
+        if (
+            _PROC_CACHE["rows"] is not None
+            and cache_key <= _PROC_CACHE["key"]
+            and now - _PROC_CACHE["ts"] < _PROC_CACHE_TTL
+        ):
+            return [
+                row for row in _PROC_CACHE["rows"]
+                if row["name"].lower() in cache_key
+            ]
+
+    filter_expr = " or ".join("Name='%s'" % n.replace("'", "''") for n in cleaned)
     ps = (
-        "Get-CimInstance Win32_Process -Filter \"Name='WorkBuddy.exe'\" | "
-        "ForEach-Object { \"$($_.ProcessId)|$($_.ExecutablePath)\" }"
+        "Get-CimInstance Win32_Process -Filter \"%s\" | "
+        "ForEach-Object { "
+        "\"$($_.ProcessId)|$($_.Name)|$($_.ExecutablePath)|$($_.CommandLine)\" }"
+        % filter_expr
     )
     try:
         out = subprocess.check_output(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            text=True, timeout=60, stderr=subprocess.DEVNULL,
+            text=True, timeout=20, stderr=subprocess.DEVNULL,
             creationflags=0x08000000,
         )
     except Exception:
+        return []
+
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("|", 3)
+        if len(parts) < 4 or not parts[0].strip().isdigit():
+            continue
+        rows.append({
+            "pid": int(parts[0].strip()),
+            "name": parts[1].strip(),
+            "path": (parts[2] or "").strip(),
+            "cmd": parts[3] if len(parts) > 3 else "",
+        })
+
+    with _PROC_CACHE_LOCK:
+        if (
+            _PROC_CACHE["rows"]
+            and now - _PROC_CACHE["ts"] < _PROC_CACHE_TTL
+        ):
+            by_pid = {r["pid"]: r for r in _PROC_CACHE["rows"]}
+            by_pid.update({r["pid"]: r for r in rows})
+            rows = list(by_pid.values())
+            cache_key = _PROC_CACHE["key"] | cache_key
+        _PROC_CACHE["ts"] = time.time()
+        _PROC_CACHE["key"] = cache_key
+        _PROC_CACHE["rows"] = rows
+    wanted = frozenset(n.lower() for n in cleaned)
+    return [row for row in rows if row["name"].lower() in wanted]
+
+
+def workbuddy_processes(exe, rows=None):
+    if not exe:
         return {}
+    if rows is None:
+        rows = _query_win32_processes(["WorkBuddy.exe"])
     wanted = str(exe).lower()
     procs = {}
-    for line in out.splitlines():
-        if "|" not in line:
+    for row in rows:
+        if row["name"].lower() != "workbuddy.exe":
             continue
-        pid_text, path = line.split("|", 1)
-        if pid_text.strip().isdigit() and path.strip().lower() == wanted:
-            procs[int(pid_text)] = path.strip()
+        path = (row.get("path") or "").strip()
+        if path.lower() == wanted:
+            procs[int(row["pid"])] = path
     return procs
 
 
@@ -831,6 +1096,11 @@ def ensure_default_account():
     }
     reg["accounts"].append(record)
     save_registry(reg)
+    # 主账号同样需要桌面入口，否则多账号时分不清从哪进
+    try:
+        ensure_desktop_entry(ident["uid"], label=record["label"])
+    except Exception:
+        pass
     return record
 
 
@@ -867,7 +1137,7 @@ def update_state(uid, patch):
 
 # ================================================================ 列表
 
-def scan_accounts():
+def scan_accounts(procs=None):
     """返回界面所需的一行行账号数据；不联网，只做本地读取。"""
     cfg = ensure_settings()
     exe = Path(cfg["workbuddy"]["exePath"]) if cfg["workbuddy"].get("exePath") else None
@@ -879,8 +1149,10 @@ def scan_accounts():
         pass
 
     reg = load_registry()
-    procs = workbuddy_processes(exe) if exe else {}
+    if procs is None:
+        procs = workbuddy_processes(exe) if exe else {}
     state = load_state()
+    # 注意：不在扫列表热路径里补建快捷方式（会起 PowerShell，拖慢刷新/滚动）
     rows = []
     seen = {}
 
@@ -897,6 +1169,7 @@ def scan_accounts():
             meta = None
         quota = (state.get(uid) or {}).get("quota") or {}
         expiry, days_left = _expiry_info(meta.get("expiresAt") if meta else None)
+        sc = shortcut_status(uid)
         rows.append({
             "product": "workbuddy",
             "key": uid,
@@ -914,9 +1187,12 @@ def scan_accounts():
             "quota": quota,
             "active": reg.get("activeUid") == a.get("accountUid"),
             "lastLoginAt": a.get("lastLoginAt") or "",
-            "note": "",
+            "note": "" if sc["exists"] else "缺少桌面入口，点右侧「桌面入口」生成",
+            "shortcutPath": sc.get("path") or "",
+            "hasShortcut": bool(sc.get("exists")),
             "canSwitch": True,
             "canStop": True,
+            "canShortcut": True,
         })
         seen[uid] = {
             "running": bool(pid),
@@ -934,14 +1210,53 @@ def scan_accounts():
                 data[uid] = prev
             write_json(STATE_PATH, data)
 
-    rows.sort(key=lambda r: (0 if r["isDefault"] else 1, r["label"]))
+    # 未登录完就关掉的实例：仍展示；缺入口只标记，补建交给后台 repair
+    for config_dir in list_pending_account_dirs():
+        key = pending_shortcut_key(config_dir)
+        sc = shortcut_status(key)
+        pid = live_pid(config_dir, procs) if procs else None
+        rows.append({
+            "product": "workbuddy",
+            "key": key,
+            "uid": key,
+            "label": sc.get("label") or ("待登录-%s" % config_dir.name),
+            "nickname": "",
+            "configDir": str(config_dir),
+            "isDefault": False,
+            "running": bool(pid),
+            "pid": pid,
+            "heartbeatSec": None,
+            "expiry": "未登录",
+            "daysLeft": None,
+            "authUpdatedAt": "",
+            "quota": {},
+            "active": False,
+            "lastLoginAt": "",
+            "note": (
+                "尚未登录登记：双击桌面入口打开后完成登录"
+                if sc["exists"] else
+                "尚未登录登记，桌面入口缺失（后台补建中）"
+            ),
+            "shortcutPath": sc.get("path") or "",
+            "hasShortcut": bool(sc.get("exists")),
+            "canSwitch": False,
+            "canStop": False,
+            "canShortcut": True,
+            "pendingLogin": True,
+        })
+
+    rows.sort(key=lambda r: (
+        0 if r.get("pendingLogin") else 1,
+        0 if r.get("isDefault") else 1,
+        r["label"],
+    ))
     return rows
 
 
 # ================================================================ 新建 / 切换 / 停止
 
 def prepare_new_account(label=None):
-    """建目录、生成启动器、拉起实例，立即返回；登录在 wait_new_login 里等。"""
+    """建目录、生成启动器、拉起实例，并立刻建桌面临时入口；登录在 wait_new_login 里等。"""
     cfg = ensure_settings()
     value = cfg["workbuddy"].get("exePath")
     if not value or not Path(value).is_file():
@@ -959,6 +1274,13 @@ def prepare_new_account(label=None):
     config_dir.mkdir(parents=True, exist_ok=False)
     started = time.time()
     independent, pid = launch_workbuddy(exe, config_dir)
+
+    # 窗口一开就要有桌面入口：没登录也能双击回来继续登
+    pending_key = pending_shortcut_key(config_dir)
+    provisional = (label or "").strip() or ("待登录-%s" % config_dir.name)
+    entry = ensure_instance_shortcut(
+        config_dir, label=provisional, exe=exe, key=pending_key, reveal=True
+    )
     return {
         "configDir": config_dir,
         "pid": pid,
@@ -967,6 +1289,10 @@ def prepare_new_account(label=None):
         "independent": independent,
         "launcher": config_dir / LAUNCHER_NAME,
         "exe": exe,
+        "pendingKey": pending_key,
+        "shortcut": entry.get("path") or "",
+        "shortcutOk": bool(entry.get("ok")),
+        "shortcutError": "" if entry.get("ok") else (entry.get("message") or ""),
     }
 
 
@@ -976,28 +1302,77 @@ def wait_new_login(info, timeout=None, stop_event=None):
     timeout = timeout or int(cfg["launch"].get("loginTimeoutSec") or 1200)
     interval = int(cfg["launch"].get("pollIntervalSec") or 2)
     deadline = time.time() + timeout
-    config_dir = info["configDir"]
+    config_dir = Path(info["configDir"])
+    pending_key = info.get("pendingKey") or pending_shortcut_key(config_dir)
+    shortcut = info.get("shortcut") or shortcut_status(pending_key).get("path") or ""
+
+    def _keep_pending_message(reason):
+        # 超时/取消/登错号：保留临时入口，避免实例「消失」
+        entry = ensure_instance_shortcut(
+            config_dir,
+            label=(info.get("label") or "").strip() or ("待登录-%s" % config_dir.name),
+            exe=info.get("exe"),
+            key=pending_key,
+            reveal=False,
+        )
+        path = entry.get("path") or shortcut or ""
+        tip = "桌面入口：%s\n双击可重新打开此实例继续登录。" % path if path else (
+            "目录已保留：%s" % config_dir
+        )
+        return {
+            "ok": False,
+            "message": "%s\n%s" % (reason, tip),
+            "record": None,
+            "shortcut": path or None,
+            "warning": "" if entry.get("ok") else (entry.get("message") or ""),
+        }
 
     ident = None
     while time.time() < deadline:
         if stop_event is not None and stop_event.is_set():
-            return {"ok": False, "message": "已取消", "record": None}
+            return _keep_pending_message("已取消等待登录。")
         ident = identity_of(config_dir, False)
-        if ident and ident["uid"] not in known_uids():
-            _, newest = auth_file_uids(config_dir, False)
-            if ident["confirmedByAuth"] and newest >= info["startedAt"] - 5:
-                break
+        if not ident:
+            time.sleep(interval)
+            continue
+
+        _, newest = auth_file_uids(config_dir, False)
+        confirmed = bool(
+            ident.get("confirmedByAuth") and newest >= float(info["startedAt"]) - 5
+        )
+        if not confirmed:
             ident = None
-        else:
-            ident = None
-        time.sleep(interval)
+            time.sleep(interval)
+            continue
+
+        if ident["uid"] in known_uids():
+            existing = find_account(ident["uid"])
+            same_dir = False
+            if existing:
+                try:
+                    same_dir = (
+                        str(Path(str(existing.get("configDir") or "")).resolve()).lower()
+                        == str(config_dir.resolve()).lower()
+                    )
+                except Exception:
+                    same_dir = False
+            if not same_dir:
+                name = ""
+                if existing:
+                    name = existing.get("nickname") or existing.get("label") or ""
+                name = name or ident.get("nickname") or ident["uid"][:8]
+                return _keep_pending_message(
+                    "新窗口登录的是已登记账号「%s」。\n"
+                    "请退出该窗口后，用新账号重新登录本实例。"
+                    % name
+                )
+            # 同目录重复识别：当作成功（极少见，走登记更新）
+            break
+
+        break
 
     if not ident:
-        return {
-            "ok": False,
-            "message": "超时未识别到登录完成。目录已保留：%s" % config_dir,
-            "record": None,
-        }
+        return _keep_pending_message("超时未识别到登录完成。")
 
     label = info.get("label") or ident["nickname"] or ("账号-%s" % config_dir.name[-2:])
     record = register_account(
@@ -1005,21 +1380,39 @@ def wait_new_login(info, timeout=None, stop_event=None):
         nickname=ident["nickname"], is_default=False,
     )
 
-    shortcut = None
-    warning = ""
-    try:
-        shortcut = create_desktop_shortcut(
-            ident["uid"], label, info["launcher"], info["exe"], config_dir
+    # 登录成功：用正式 uid/昵称重建入口，并清掉 pending 临时登记
+    entry = ensure_instance_shortcut(
+        config_dir, label=label, exe=info.get("exe"),
+        key=ident["uid"], reveal=True,
+    )
+    if pending_key.lower() != str(ident["uid"]).lower():
+        # 删掉 pending 记录；若临时 lnk 与新 lnk 不是同一文件则删文件
+        old = shortcut_status(pending_key)
+        new_path = entry.get("path") or ""
+        delete_file = bool(old.get("path") and old["path"] != new_path)
+        drop_shortcut_key(pending_key, delete_file=delete_file)
+
+    shortcut = entry.get("path") or shortcut or ""
+    warning = "" if entry.get("ok") else (entry.get("message") or "桌面入口创建失败")
+    if entry.get("ok"):
+        message = (
+            "登录完成，账号已登记。\n"
+            "桌面入口：\n%s\n"
+            "以后请双击该快捷方式启动此账号。"
+            % shortcut
         )
-        message = "登录完成，账号已登记。\n桌面入口：%s" % shortcut
-    except Exception as exc:
-        warning = str(exc)
-        message = "登录完成，账号已登记。\n桌面入口创建失败：%s" % exc
+    else:
+        message = (
+            "登录完成，账号已登记。\n"
+            "但桌面入口更新失败：%s\n"
+            "请到「账号」页点「桌面入口」重试。"
+            % warning
+        )
     return {
         "ok": True,
         "message": message,
         "record": record,
-        "shortcut": shortcut,
+        "shortcut": shortcut or None,
         "warning": warning,
     }
 
@@ -1445,36 +1838,25 @@ def _is_electron_main(cmd):
     return not any(not a.startswith("-") for a in args)
 
 
-def _electron_mains(names):
+def _electron_mains(names, rows=None):
     """返回指定进程名的主进程（排除 --type= 与带脚本参数的子进程）。"""
     if os.name != "nt" or not names:
         return []
-    filter_expr = " or ".join("Name='%s'" % n for n in names)
-    ps = (
-        "Get-CimInstance Win32_Process -Filter \"%s\" | "
-        "ForEach-Object { \"$($_.ProcessId)|$($_.Name)|$($_.CommandLine)\" }"
-        % filter_expr
-    )
-    try:
-        out = subprocess.check_output(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            text=True, timeout=30, stderr=subprocess.DEVNULL,
-            creationflags=0x08000000,
-        )
-    except Exception:
-        return []
+    if rows is None:
+        rows = _query_win32_processes(names)
 
+    wanted = {str(n).lower() for n in names}
     result = []
-    for line in out.splitlines():
-        parts = line.split("|", 2)
-        if len(parts) < 3:
+    for row in rows:
+        name = row.get("name") or ""
+        if name.lower() not in wanted:
             continue
-        pid_text, name, cmd = parts[0].strip(), parts[1].strip(), parts[2]
-        if not pid_text.isdigit() or not _is_electron_main(cmd):
+        cmd = row.get("cmd") or ""
+        if not _is_electron_main(cmd):
             continue
         match = re.search(r'--user-data-dir=(?:"([^"]+)"|(\S+))', cmd, re.I)
         result.append({
-            "pid": int(pid_text),
+            "pid": int(row["pid"]),
             "name": name,
             "dataDir": Path(match.group(1) or match.group(2)) if match else None,
         })
@@ -1773,13 +2155,20 @@ def refresh_quota_any(product, key):
 
 def scan_all_products():
     """界面用：三端分组，本地只读，不联网。"""
-    mains = _electron_mains(["Trae CN.exe", "Qoder.exe"])
+    # 一次进程查询覆盖三端，避免打开账号页连开两次 PowerShell。
+    rows = _query_win32_processes(["WorkBuddy.exe", "Trae CN.exe", "Qoder.exe"])
+    cfg = ensure_settings()
+    exe = Path(cfg["workbuddy"]["exePath"]) if cfg["workbuddy"].get("exePath") else None
+    if exe and not exe.is_file():
+        exe = None
+    wb_procs = workbuddy_processes(exe, rows=rows) if exe else {}
+    mains = _electron_mains(["Trae CN.exe", "Qoder.exe"], rows=rows)
     return [
         {
             "product": "workbuddy",
             "title": "WorkBuddy",
             "hint": "多实例：切换、停止、桌面入口",
-            "accounts": scan_accounts(),
+            "accounts": scan_accounts(procs=wb_procs),
         },
         {
             "product": "trae",

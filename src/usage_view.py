@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk
 
 import usage
+from ui_widgets import SlimScrollbar, attach_canvas_scroll
 
 FAMILY = "Microsoft YaHei UI"
 BG = "#F4F6F9"
@@ -173,6 +174,7 @@ class UsagePage:
         self.elapsed = 0.0
         self._loaded_once = False
         self._pills = {}
+        self._scroll = {"region_job": None}
         self._build()
         self._refresh_pills()
         self._render()
@@ -223,29 +225,16 @@ class UsagePage:
         body = tk.Frame(self.frame, bg=BG)
         body.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(body, bg=BG, highlightthickness=0, bd=0)
-        scroll = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
+        self.scrollbar = SlimScrollbar(body, bg=BG)
+        self.scrollbar.pack(side="right", fill="y", padx=(4, 0))
         self.canvas.pack(side="left", fill="both", expand=True)
 
         self.inner = tk.Frame(self.canvas, bg=BG)
         self._window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>", self._on_inner)
-        self.canvas.bind("<Configure>", self._on_canvas)
-        self.canvas.bind("<Enter>", lambda _e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda _e: self.canvas.unbind_all("<MouseWheel>"))
-
-    def _on_inner(self, _event=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _on_canvas(self, event):
-        self.canvas.itemconfigure(self._window, width=event.width)
-
-    def _wheel(self, event):
-        try:
-            self.canvas.yview_scroll(int(-event.delta / 120), "units")
-        except Exception:
-            pass
+        attach_canvas_scroll(
+            self.canvas, self.scrollbar, self.inner, self._window,
+            self.app.root, self._scroll,
+        )
 
     # ------------------------------------------------------------ 状态
     def on_show(self):
@@ -328,6 +317,11 @@ class UsagePage:
 
     # ------------------------------------------------------------ 渲染入口
     def _render(self):
+        try:
+            self.inner.unbind("<Configure>")
+        except Exception:
+            pass
+        self.canvas.configure(yscrollcommand="")
         for child in self.inner.winfo_children():
             child.destroy()
         snap = self.snapshot or {}
@@ -336,11 +330,11 @@ class UsagePage:
 
         if self.busy and not products:
             self._empty("正在采集本地用量记录…", "首次扫描 WorkBuddy / CodeBuddy 可能需要十几秒。")
-            self._update_status()
+            self._finish_render()
             return
         if not products:
             self._empty("还没有用量数据", "点右上角「重新采集」开始读取本地记录。")
-            self._update_status()
+            self._finish_render()
             return
 
         if self.error:
@@ -351,9 +345,24 @@ class UsagePage:
             self._render_trae(products.get("trae") or {})
         else:
             self._render_product(products.get(self.product) or {})
+        self._finish_render()
+
+    def _finish_render(self):
+        on_inner = self._scroll.get("on_inner")
+        if callable(on_inner):
+            self.inner.bind("<Configure>", on_inner)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        sync = self._scroll.get("sync_region")
+        if callable(sync):
+            sync()
+        else:
+            try:
+                self.canvas.configure(
+                    scrollregion=self.canvas.bbox("all") or (0, 0, 0, 0)
+                )
+            except Exception:
+                pass
         self._update_status()
-        self.inner.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _update_status(self):
         snap = self.snapshot or {}

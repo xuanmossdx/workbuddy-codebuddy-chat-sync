@@ -16,9 +16,12 @@ import tkinter.font as tkfont
 import traceback
 from tkinter import messagebox, simpledialog, ttk
 
+import time
+
 import accounts as acct
 import sync_core as core
 import usage_view
+from ui_widgets import SlimScrollbar, attach_canvas_scroll
 
 # 同步页的「最后状态」跟着账号数据一起放在便携目录里；
 # 同步配置与日志仍由 sync_core 管理，位置和格式都不变。
@@ -45,6 +48,7 @@ WARN_BG = "#FFF4E2"
 DANGER = "#C2410C"
 DANGER_BG = "#FDECEC"
 SOFT_BG = "#F7F9FC"
+FAINT = "#98A2B3"
 
 PRODUCTS = (("wb", "WorkBuddy"), ("cb", "CodeBuddy"))
 PRODUCT_TITLES = dict(PRODUCTS)
@@ -184,6 +188,11 @@ class App:
         self._acct_busy = False
         self._acct_groups = []
         self._quota_labels = {}
+        self._sync_scroll = {"region_job": None}
+        self._acct_scroll = {"region_job": None}
+        self._acct_refreshed_at = 0.0
+        self._acct_fp = ""
+        self._acct_repair_running = False
 
         self._setup_window(icon_image)
         self._build_ui()
@@ -268,8 +277,12 @@ class App:
             expand=[("selected", (0, 0, 0, 1))],
         )
         style.configure(
-            "TScrollbar", background="#D8DFE9", troughcolor=BG,
-            borderwidth=0, arrowsize=12,
+            "TScrollbar", background="#C5CEDA", troughcolor="#EEF2F7",
+            borderwidth=0, arrowsize=10, relief="flat",
+        )
+        style.map(
+            "TScrollbar",
+            background=[("active", "#9AA8BA"), ("pressed", "#7F8EA3")],
         )
 
     def _build_ui(self):
@@ -320,20 +333,19 @@ class App:
         body = tk.Frame(parent, bg=BG)
         body.pack(fill="both", expand=True, pady=(4, 0))
 
-        self.canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
+        self.canvas = tk.Canvas(body, bg=BG, highlightthickness=0, bd=0)
+        self._sync_scrollbar = SlimScrollbar(body, bg=BG)
+        self._sync_scrollbar.pack(side="right", fill="y", padx=(4, 0))
         self.canvas.pack(side="left", fill="both", expand=True)
 
         self.inner = tk.Frame(self.canvas, bg=BG)
         self._canvas_window = self.canvas.create_window(
             (0, 0), window=self.inner, anchor="nw"
         )
-        self.inner.bind("<Configure>", self._on_inner_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self.canvas.bind("<Enter>", self._bind_wheel)
-        self.canvas.bind("<Leave>", self._unbind_wheel)
+        attach_canvas_scroll(
+            self.canvas, self._sync_scrollbar, self.inner,
+            self._canvas_window, self.root, self._sync_scroll,
+        )
 
         self.loading_label = tk.Label(
             self.inner, text="正在读取账号信息…", bg=BG, fg=MUTED,
@@ -407,7 +419,8 @@ class App:
         )
         self.acct_new_btn.pack(side="right")
         self.acct_refresh_btn = ttk.Button(
-            top, text="刷新列表", command=self.refresh_accounts
+            top, text="刷新列表",
+            command=lambda: self.refresh_accounts(force=True),
         )
         self.acct_refresh_btn.pack(side="right", padx=(0, 8))
 
@@ -433,32 +446,19 @@ class App:
 
         body = tk.Frame(parent, bg=BG)
         body.pack(fill="both", expand=True)
-        self.acct_canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(
-            body, orient="vertical", command=self.acct_canvas.yview
-        )
-        self.acct_canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
+        self.acct_canvas = tk.Canvas(body, bg=BG, highlightthickness=0, bd=0)
+        self._acct_scrollbar = SlimScrollbar(body, bg=BG)
+        self._acct_scrollbar.pack(side="right", fill="y", padx=(4, 0))
         self.acct_canvas.pack(side="left", fill="both", expand=True)
 
         self.acct_inner = tk.Frame(self.acct_canvas, bg=BG)
         self._acct_window = self.acct_canvas.create_window(
             (0, 0), window=self.acct_inner, anchor="nw"
         )
-        self.acct_inner.bind(
-            "<Configure>",
-            lambda _e: self.acct_canvas.configure(
-                scrollregion=self.acct_canvas.bbox("all")
-            ),
+        attach_canvas_scroll(
+            self.acct_canvas, self._acct_scrollbar, self.acct_inner,
+            self._acct_window, self.root, self._acct_scroll,
         )
-        self.acct_canvas.bind(
-            "<Configure>",
-            lambda e: self.acct_canvas.itemconfigure(
-                self._acct_window, width=e.width
-            ),
-        )
-        self.acct_canvas.bind("<Enter>", self._bind_acct_wheel)
-        self.acct_canvas.bind("<Leave>", self._unbind_acct_wheel)
 
         self.acct_loading = tk.Label(
             self.acct_inner, text="正在读取本地账号…", bg=BG, fg=MUTED,
@@ -473,20 +473,6 @@ class App:
         self.acct_status.pack(fill="x", pady=(6, 0))
 
         self.acct_buttons = [self.acct_new_btn, self.acct_refresh_btn]
-
-    # ------------------------------------------------------------ 账号页滚动
-
-    def _bind_acct_wheel(self, _event):
-        self.acct_canvas.bind_all("<MouseWheel>", self._on_acct_wheel)
-
-    def _unbind_acct_wheel(self, _event):
-        self.acct_canvas.unbind_all("<MouseWheel>")
-
-    def _on_acct_wheel(self, event):
-        try:
-            self.acct_canvas.yview_scroll(int(-event.delta / 120), "units")
-        except Exception:
-            pass
 
     def _chip(self, parent, text, bg, fg):
         return tk.Label(
@@ -558,12 +544,12 @@ class App:
         top = tk.Frame(inner, bg=CARD)
         top.pack(fill="x")
 
-        avatar = tk.Canvas(top, width=36, height=36, bg=CARD,
-                           highlightthickness=0, bd=0)
+        avatar = tk.Label(
+            top, text=self._initial(row.get("label")),
+            bg=color, fg="#FFFFFF", font=(FAMILY, 10, "bold"),
+            width=3, height=1, padx=2, pady=4,
+        )
         avatar.pack(side="left", padx=(0, 10))
-        avatar.create_oval(1, 1, 35, 35, fill=color, outline="")
-        avatar.create_text(18, 18, text=self._initial(row.get("label")),
-                           fill="#FFFFFF", font=(FAMILY, 10, "bold"))
 
         info = tk.Frame(top, bg=CARD)
         info.pack(side="left", fill="x", expand=True)
@@ -581,6 +567,15 @@ class App:
             self._chip(name_row, "当前", OK_BG, OK_GREEN).pack(
                 side="left", padx=(6, 0)
             )
+        if row.get("canShortcut"):
+            if row.get("hasShortcut"):
+                self._chip(name_row, "桌面入口", OK_BG, OK_GREEN).pack(
+                    side="left", padx=(6, 0)
+                )
+            else:
+                self._chip(name_row, "无桌面入口", WARN_BG, WARN).pack(
+                    side="left", padx=(6, 0)
+                )
         uid = row.get("uid") or ""
         uid_text = (uid[:8] + "…") if len(uid) > 8 else (uid or "未知")
         tk.Label(
@@ -658,6 +653,13 @@ class App:
                 actions, text="停止", style="Small.TButton",
                 command=lambda: self._stop_row(row),
             ).pack(side="left", padx=(6, 0))
+        if row.get("canShortcut"):
+            ttk.Button(
+                actions,
+                text="桌面入口" if row.get("hasShortcut") else "生成入口",
+                style="Small.TButton",
+                command=lambda: self._shortcut_row(row),
+            ).pack(side="left", padx=(6, 0))
         ttk.Button(
             actions, text="打开目录", style="Small.TButton",
             command=lambda: self._open_row_dir(row),
@@ -669,26 +671,6 @@ class App:
         if len(text) <= limit:
             return text
         return text[: max(0, limit // 2) - 1] + "…" + text[-(limit // 2):]
-
-    # ------------------------------------------------------------ 滚动
-
-    def _on_inner_configure(self, _event):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _on_canvas_configure(self, event):
-        self.canvas.itemconfigure(self._canvas_window, width=event.width)
-
-    def _bind_wheel(self, _event):
-        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
-
-    def _unbind_wheel(self, _event):
-        self.canvas.unbind_all("<MouseWheel>")
-
-    def _on_wheel(self, event):
-        try:
-            self.canvas.yview_scroll(int(-event.delta / 120), "units")
-        except Exception:
-            pass
 
     # ------------------------------------------------------------ 线程桥
 
@@ -771,7 +753,7 @@ class App:
             self.usage.refresh()
             return
         if index == 2:
-            self.refresh_accounts()
+            self.refresh_accounts(force=True)
             return
         self.refresh()
 
@@ -783,7 +765,8 @@ class App:
         if index == 1:
             self.usage.on_show()
         elif index == 2:
-            self.refresh_accounts()
+            # 已有列表且刚刷过：直接展示，避免每次切页整表销毁重建
+            self.refresh_accounts(force=False)
 
     def _load_worker(self, gen):
         try:
@@ -803,6 +786,11 @@ class App:
             return
 
         self._snapshot = snap
+        try:
+            self.inner.unbind("<Configure>")
+        except Exception:
+            pass
+        self.canvas.configure(yscrollcommand="")
         for child in self.inner.winfo_children():
             child.destroy()
         self._action_buttons = [self.refresh_btn, self.sync_btn]
@@ -810,6 +798,13 @@ class App:
         for key, _title in PRODUCTS:
             self._render_product(self.inner, key, snap["products"][key])
 
+        on_inner = self._sync_scroll.get("on_inner")
+        if callable(on_inner):
+            self.inner.bind("<Configure>", on_inner)
+        self.canvas.configure(yscrollcommand=self._sync_scrollbar.set)
+        sync = self._sync_scroll.get("sync_region")
+        if callable(sync):
+            sync()
         self.canvas.yview_moveto(0)
         self.set_auto_state(
             self.auto_enabled, int(snap["cfg"].get("interval_seconds") or 120)
@@ -1088,11 +1083,42 @@ class App:
             except Exception:
                 pass
 
-    def refresh_accounts(self):
+    def refresh_accounts(self, force=True):
         if self._acct_busy or not hasattr(self, "acct_canvas"):
+            return
+        # 切页复用 8 秒内缓存，打开更跟手；点「刷新列表」仍强制扫盘
+        if (
+            not force
+            and self._acct_groups
+            and (time.monotonic() - self._acct_refreshed_at) < 8.0
+        ):
             return
         self._set_acct_busy(True, "正在读取本地账号…")
         threading.Thread(target=self._accounts_worker, daemon=True).start()
+
+    @staticmethod
+    def _accounts_fingerprint(groups):
+        """列表内容指纹：相同则跳过整表销毁重建，减轻刷新卡顿。"""
+        parts = []
+        for group in groups or []:
+            parts.append(str(group.get("product") or ""))
+            for row in group.get("accounts") or []:
+                quota = row.get("quota") or {}
+                parts.append(
+                    "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s"
+                    % (
+                        row.get("key") or "",
+                        row.get("label") or "",
+                        int(bool(row.get("running"))),
+                        int(bool(row.get("active"))),
+                        row.get("expiry") or "",
+                        quota.get("text") or "",
+                        int(bool(row.get("hasShortcut"))),
+                        row.get("note") or "",
+                        row.get("shortcutPath") or "",
+                    )
+                )
+        return "\n".join(parts)
 
     def _accounts_worker(self):
         try:
@@ -1103,6 +1129,26 @@ class App:
             err = traceback.format_exc(limit=2)
         self.post(lambda: self._apply_accounts(groups, err))
 
+    def _schedule_shortcut_repair(self):
+        """快捷方式补建放到后台，避免挡住列表渲染。"""
+        if self._acct_repair_running:
+            return
+        self._acct_repair_running = True
+
+        def _worker():
+            try:
+                result = acct.repair_missing_shortcuts()
+            except Exception:
+                result = {"repaired": [], "errors": []}
+            def _done():
+                self._acct_repair_running = False
+                if result.get("repaired"):
+                    # 补建成功后强制刷一次，把「缺入口」标记去掉
+                    self.refresh_accounts(force=True)
+            self.post(_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _apply_accounts(self, groups, err):
         self._acct_busy = False
         self._apply_acct_buttons()
@@ -1112,25 +1158,80 @@ class App:
             return
 
         self._acct_groups = groups
-        self._quota_labels = {}
-        for child in self.acct_inner.winfo_children():
-            child.destroy()
-        total = 0
-        for index, group in enumerate(groups):
-            total += len(group["accounts"])
-            self._render_acct_group(group, index == 0)
+        self._acct_refreshed_at = time.monotonic()
+        total = sum(len(g.get("accounts") or []) for g in (groups or []))
+        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+        fp = self._accounts_fingerprint(groups)
 
         try:
             self.data_dir_label.config(text=acct.data_dir_text())
         except Exception:
             pass
-        self.acct_canvas.yview_moveto(0)
+
+        # 数据没变：只更新状态行，不拆卡片（滚动中刷新不再顿一下）
+        if fp == self._acct_fp and self.acct_inner.winfo_children():
+            self.acct_status.config(
+                text="共 %d 个账号 · %s" % (total, stamp), fg=MUTED
+            )
+            self._schedule_shortcut_repair()
+            return
+
+        self._acct_fp = fp
+        self._quota_labels = {}
+        y_pos = 0.0
+        try:
+            y_pos = float(self.acct_canvas.yview()[0])
+        except Exception:
+            y_pos = 0.0
+
+        try:
+            self.acct_inner.unbind("<Configure>")
+        except Exception:
+            pass
+        self.acct_canvas.configure(yscrollcommand="")
+
+        # 整框替换比逐子控件 destroy 更顺，旧树放到 idle 再拆
+        old_inner = self.acct_inner
+        self.acct_inner = tk.Frame(self.acct_canvas, bg=BG)
+        try:
+            self.acct_canvas.itemconfigure(self._acct_window, window=self.acct_inner)
+        except Exception:
+            pass
+
+        for index, group in enumerate(groups or []):
+            self._render_acct_group(group, index == 0)
+
+        on_inner = self._acct_scroll.get("on_inner")
+        if callable(on_inner):
+            self.acct_inner.bind("<Configure>", on_inner)
+        self.acct_canvas.configure(yscrollcommand=self._acct_scrollbar.set)
+        sync = self._acct_scroll.get("sync_region")
+        if callable(sync):
+            sync()
+        else:
+            try:
+                self.acct_canvas.configure(
+                    scrollregion=self.acct_canvas.bbox("all") or (0, 0, 0, 0)
+                )
+            except Exception:
+                pass
+
+        try:
+            self.acct_canvas.yview_moveto(y_pos)
+        except Exception:
+            self.acct_canvas.yview_moveto(0)
         self.acct_status.config(
-            text="共 %d 个账号 · %s" % (
-                total, datetime.datetime.now().strftime("%H:%M:%S")
-            ),
-            fg=MUTED,
+            text="共 %d 个账号 · %s" % (total, stamp), fg=MUTED
         )
+
+        def _drop_old():
+            try:
+                old_inner.destroy()
+            except Exception:
+                pass
+
+        self.root.after_idle(_drop_old)
+        self._schedule_shortcut_repair()
 
     def _switch_row(self, row):
         if self._acct_busy:
@@ -1225,10 +1326,49 @@ class App:
         if not os.path.isdir(path):
             messagebox.showwarning("目录不存在", path, parent=self.root)
             return
+        # Explorer 拉起放后台，避免卡住界面滚动
+        def _open():
+            try:
+                os.startfile(path)
+            except Exception as exc:
+                self.post(lambda: messagebox.showwarning(
+                    "打开失败", "%s\n\n%s" % (path, exc), parent=self.root
+                ))
+        threading.Thread(target=_open, daemon=True).start()
+
+    def _shortcut_row(self, row):
+        """生成或打开该账号的桌面入口。"""
+        if self._acct_busy:
+            return
+        if row.get("hasShortcut") and row.get("shortcutPath"):
+            path = row["shortcutPath"]
+            def _reveal():
+                try:
+                    acct.reveal_desktop_shortcut(path)
+                    self.post(lambda: self.acct_status.config(
+                        text="已在桌面选中：%s" % path, fg=MUTED
+                    ))
+                except Exception as exc:
+                    self.post(lambda: messagebox.showwarning(
+                        "打开失败", str(exc), parent=self.root
+                    ))
+            threading.Thread(target=_reveal, daemon=True).start()
+            return
+
+        self._set_acct_busy(True, "正在生成「%s」的桌面入口…" % row["label"])
+        threading.Thread(
+            target=self._shortcut_worker, args=(row["uid"], row["label"]), daemon=True
+        ).start()
+
+    def _shortcut_worker(self, uid, label):
         try:
-            os.startfile(path)
+            result = acct.ensure_desktop_entry(uid, label=label, reveal=True)
         except Exception as exc:
-            messagebox.showwarning("打开失败", "%s\n\n%s" % (path, exc), parent=self.root)
+            result = {"ok": False, "message": "生成失败：%s" % exc, "path": ""}
+        self.post(lambda: self._account_op_done(
+            bool(result.get("ok")),
+            result.get("message") or ("桌面入口：%s" % result.get("path", "")),
+        ))
 
     def new_account(self):
         if self._acct_busy:
@@ -1251,9 +1391,21 @@ class App:
             core.log("新建账号失败：" + traceback.format_exc(limit=2))
             self.post(lambda: self._account_op_done(False, msg))
             return
-        self.post(lambda: self._set_acct_busy(
-            True, "已拉起新实例，请在 WorkBuddy 窗口完成登录…"
-        ))
+        shortcut = info.get("shortcut") or ""
+        if info.get("shortcutOk") and shortcut:
+            wait_text = (
+                "已拉起新实例，桌面入口已创建。\n请在 WorkBuddy 窗口完成登录…\n%s"
+                % shortcut
+            )
+        else:
+            wait_text = (
+                "已拉起新实例，请在窗口完成登录…"
+                + (
+                    "（桌面入口失败：%s）" % info.get("shortcutError")
+                    if info.get("shortcutError") else ""
+                )
+            )
+        self.post(lambda: self._set_acct_busy(True, wait_text.replace("\n", " ")))
         try:
             result = acct.wait_new_login(info)
         except Exception as exc:
@@ -1261,11 +1413,16 @@ class App:
         self.post(lambda: self._account_op_done(result["ok"], result["message"]))
 
     def open_tool_data_dir(self):
-        try:
-            os.makedirs(str(acct.DATA_DIR), exist_ok=True)
-            os.startfile(str(acct.DATA_DIR))
-        except Exception as exc:
-            messagebox.showwarning("打开失败", "%s" % exc, parent=self.root)
+        path = str(acct.DATA_DIR)
+        def _open():
+            try:
+                os.makedirs(path, exist_ok=True)
+                os.startfile(path)
+            except Exception as exc:
+                self.post(lambda: messagebox.showwarning(
+                    "打开失败", "%s" % exc, parent=self.root
+                ))
+        threading.Thread(target=_open, daemon=True).start()
 
     def show_log(self):
         if self._log_win is not None:
