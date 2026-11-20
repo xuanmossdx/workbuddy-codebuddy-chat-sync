@@ -18,6 +18,7 @@ from tkinter import messagebox, simpledialog, ttk
 
 import accounts as acct
 import sync_core as core
+import usage_view
 
 # 同步页的「最后状态」跟着账号数据一起放在便携目录里；
 # 同步配置与日志仍由 sync_core 管理，位置和格式都不变。
@@ -47,6 +48,11 @@ SOFT_BG = "#F7F9FC"
 
 PRODUCTS = (("wb", "WorkBuddy"), ("cb", "CodeBuddy"))
 PRODUCT_TITLES = dict(PRODUCTS)
+PRODUCT_COLORS = {
+    "wb": "#12A150", "cb": "#2F6FED",
+    "workbuddy": "#12A150", "codebuddy": "#2F6FED",
+    "trae": "#E8590C", "qoder": "#6D5DF6",
+}
 
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
@@ -187,7 +193,7 @@ class App:
     # ------------------------------------------------------------ 基础
 
     def _setup_window(self, icon_image):
-        self.root.title("账号记录同步")
+        self.root.title("WorkBuddy 工具台")
         self.root.configure(bg=BG)
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -271,27 +277,35 @@ class App:
         header.pack(fill="x", padx=20, pady=(12, 6))
         title_box = tk.Frame(header, bg=BG)
         title_box.pack(side="left", fill="x", expand=True)
+        self._brand = tk.Frame(title_box, bg=BG)
+        self._brand.pack(anchor="w")
+        logo = tk.Label(self._brand, text="W", bg=ACCENT, fg="#FFFFFF",
+                        font=(FAMILY, 13, "bold"), width=2, height=1)
+        logo.pack(side="left", padx=(0, 10))
         tk.Label(
-            title_box, text="账号记录同步", bg=BG, fg=TEXT,
-            font=(FAMILY, 16, "bold"), anchor="w",
-        ).pack(anchor="w")
+            self._brand, text="WorkBuddy 工具台", bg=BG, fg=TEXT,
+            font=(FAMILY, 17, "bold"), anchor="w",
+        ).pack(side="left")
         tk.Label(
             title_box,
-            text="把本地聊天记录归到指定账号；「账号」页查看 WorkBuddy / Trae / Qoder 的登录态与额度。",
+            text="聊天记录同步 · 账号额度 · 用量看板；金额按真实 token 折算，积分只展示。",
             bg=BG, fg=MUTED, font=(FAMILY, 9), anchor="w",
-        ).pack(anchor="w", pady=(2, 0))
-        self.refresh_btn = ttk.Button(header, text="刷新", command=self.refresh_current)
+        ).pack(anchor="w", pady=(3, 0))
+        self.refresh_btn = ttk.Button(header, text="刷新当前页", command=self.refresh_current)
         self.refresh_btn.pack(side="right", padx=(12, 0))
 
         self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=20, pady=(4, 12))
+        self.notebook.pack(fill="both", expand=True, padx=20, pady=(6, 12))
         self.sync_page = tk.Frame(self.notebook, bg=BG)
+        self.usage_page = tk.Frame(self.notebook, bg=BG)
         self.accounts_page = tk.Frame(self.notebook, bg=BG)
         self.notebook.add(self.sync_page, text="  聊天记录同步  ")
+        self.notebook.add(self.usage_page, text="  用量看板  ")
         self.notebook.add(self.accounts_page, text="  账号  ")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self._build_sync_page(self.sync_page)
+        self.usage = usage_view.UsagePage(self.usage_page, self)
         self._build_accounts_page(self.accounts_page)
 
         self._action_buttons = [self.refresh_btn, self.sync_btn]
@@ -482,7 +496,10 @@ class App:
 
     def _render_acct_group(self, group, first):
         head = tk.Frame(self.acct_inner, bg=BG)
-        head.pack(fill="x", padx=2, pady=(0 if first else 12, 6))
+        head.pack(fill="x", padx=2, pady=(0 if first else 14, 6))
+        color = PRODUCT_COLORS.get(group["product"], ACCENT)
+        tk.Label(head, text="●", bg=BG, fg=color,
+                 font=(FAMILY, 10)).pack(side="left", padx=(0, 6))
         tk.Label(
             head, text=group["title"], bg=BG, fg=TEXT,
             font=(FAMILY, 12, "bold"),
@@ -501,50 +518,83 @@ class App:
                 highlightbackground=BORDER, highlightthickness=1,
             )
             card.pack(fill="x", pady=(0, 2))
+            empty = tk.Frame(card, bg=CARD)
+            empty.pack(fill="x", padx=14, pady=14)
+            tk.Label(empty, text="○", bg=CARD, fg=FAINT,
+                     font=(FAMILY, 14)).pack(side="left", padx=(0, 10))
+            box = tk.Frame(empty, bg=CARD)
+            box.pack(side="left", fill="x", expand=True)
             tk.Label(
-                card, text="未在本机发现该产品的账号数据。",
-                bg=CARD, fg=MUTED, font=(FAMILY, 9),
-            ).pack(anchor="w", padx=14, pady=14)
+                box, text="未在本机发现该产品的账号数据。",
+                bg=CARD, fg=TEXT, font=(FAMILY, 9, "bold"), anchor="w",
+            ).pack(anchor="w")
+            tk.Label(
+                box, text="登录一次该软件并产生会话后，这里会自动出现。",
+                bg=CARD, fg=MUTED, font=(FAMILY, 8), anchor="w",
+            ).pack(anchor="w", pady=(2, 0))
             return
 
         for row in group["accounts"]:
             self._render_acct_row(group["product"], row)
 
+    @staticmethod
+    def _initial(label):
+        text = str(label or "").strip()
+        return text[0] if text else "?"
+
     def _render_acct_row(self, product, row):
-        card = tk.Frame(
+        color = PRODUCT_COLORS.get(product, ACCENT)
+        outer = tk.Frame(
             self.acct_inner, bg=CARD,
             highlightbackground=BORDER, highlightthickness=1,
         )
-        card.pack(fill="x", pady=(0, 6))
+        outer.pack(fill="x", pady=(0, 6))
+        tk.Frame(outer, bg=color, width=3).pack(side="left", fill="y")
+        card = tk.Frame(outer, bg=CARD)
+        card.pack(side="left", fill="both", expand=True)
         inner = tk.Frame(card, bg=CARD)
         inner.pack(fill="x", padx=14, pady=10)
 
-        head = tk.Frame(inner, bg=CARD)
-        head.pack(fill="x")
+        top = tk.Frame(inner, bg=CARD)
+        top.pack(fill="x")
+
+        avatar = tk.Canvas(top, width=36, height=36, bg=CARD,
+                           highlightthickness=0, bd=0)
+        avatar.pack(side="left", padx=(0, 10))
+        avatar.create_oval(1, 1, 35, 35, fill=color, outline="")
+        avatar.create_text(18, 18, text=self._initial(row.get("label")),
+                           fill="#FFFFFF", font=(FAMILY, 10, "bold"))
+
+        info = tk.Frame(top, bg=CARD)
+        info.pack(side="left", fill="x", expand=True)
+        name_row = tk.Frame(info, bg=CARD)
+        name_row.pack(fill="x")
         tk.Label(
-            head, text=row["label"], bg=CARD, fg=TEXT,
+            name_row, text=row["label"], bg=CARD, fg=TEXT,
             font=(FAMILY, 11, "bold"),
         ).pack(side="left")
         if row.get("isDefault"):
-            self._chip(head, "默认", "#EEF3FF", ACCENT).pack(
+            self._chip(name_row, "默认", "#EEF3FF", ACCENT).pack(
                 side="left", padx=(8, 0)
             )
         if row.get("active"):
-            self._chip(head, "当前", OK_BG, OK_GREEN).pack(
+            self._chip(name_row, "当前", OK_BG, OK_GREEN).pack(
                 side="left", padx=(6, 0)
             )
         uid = row.get("uid") or ""
         uid_text = (uid[:8] + "…") if len(uid) > 8 else (uid or "未知")
         tk.Label(
-            head, text="UID %s" % uid_text, bg=CARD, fg=MUTED,
-            font=(FAMILY, 8),
-        ).pack(side="left", padx=(10, 0))
+            info, text="UID %s" % uid_text, bg=CARD, fg=MUTED,
+            font=(FAMILY, 8), anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
 
+        right = tk.Frame(top, bg=CARD)
+        right.pack(side="right")
         if row["running"]:
             status_text, status_fg, status_bg = "● 运行中", OK_GREEN, OK_BG
         else:
             status_text, status_fg, status_bg = "○ 未运行", MUTED, "#F1F3F6"
-        self._chip(head, status_text, status_bg, status_fg).pack(side="right")
+        self._chip(right, status_text, status_bg, status_fg).pack(side="right")
 
         expiry = row.get("expiry") or "未知"
         days = row.get("daysLeft")
@@ -554,10 +604,10 @@ class App:
             text, fg, bg = "登录态 %s（%d 天）" % (expiry, days), WARN, WARN_BG
         else:
             text, fg, bg = "登录态 %s" % expiry, MUTED, "#F1F3F6"
-        self._chip(head, text, bg, fg).pack(side="right", padx=(0, 6))
+        self._chip(right, text, bg, fg).pack(side="right", padx=(0, 6))
 
         meta = tk.Frame(inner, bg=CARD)
-        meta.pack(fill="x", pady=(6, 0))
+        meta.pack(fill="x", pady=(8, 0))
         path_text = self._shorten(row.get("configDir") or "", 74)
         tk.Label(
             meta, text=path_text, bg=CARD, fg=MUTED,
@@ -576,7 +626,7 @@ class App:
         qbox = tk.Frame(foot, bg=SOFT_BG)
         qbox.pack(side="left", fill="x", expand=True)
         tk.Label(
-            qbox, text="额度", bg=SOFT_BG, fg=MUTED, font=(FAMILY, 8)
+            qbox, text="额度", bg=SOFT_BG, fg=MUTED, font=(FAMILY, 8, "bold")
         ).pack(side="left", padx=(10, 6), pady=6)
         quota = row.get("quota") or {}
         if quota:
@@ -714,19 +764,26 @@ class App:
     def refresh_current(self):
         """顶栏「刷新」跟随当前页。"""
         try:
-            if self.notebook.index(self.notebook.select()) == 1:
-                self.refresh_accounts()
-                return
+            index = self.notebook.index(self.notebook.select())
         except Exception:
-            pass
+            index = 0
+        if index == 1:
+            self.usage.refresh()
+            return
+        if index == 2:
+            self.refresh_accounts()
+            return
         self.refresh()
 
     def _on_tab_changed(self, _event):
         try:
-            if self.notebook.index(self.notebook.select()) == 1:
-                self.refresh_accounts()
+            index = self.notebook.index(self.notebook.select())
         except Exception:
-            pass
+            return
+        if index == 1:
+            self.usage.on_show()
+        elif index == 2:
+            self.refresh_accounts()
 
     def _load_worker(self, gen):
         try:
@@ -760,17 +817,33 @@ class App:
         self._apply_busy_state()
 
     def _render_product(self, parent, key, snap):
-        card = tk.Frame(
+        color = PRODUCT_COLORS.get(key, ACCENT)
+        outer = tk.Frame(
             parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1
         )
-        card.pack(fill="x", pady=(0, 12))
+        outer.pack(fill="x", pady=(0, 12))
+        tk.Frame(outer, bg=color, width=4).pack(side="left", fill="y")
+        card = tk.Frame(outer, bg=CARD)
+        card.pack(side="left", fill="both", expand=True)
 
         head = tk.Frame(card, bg=CARD)
-        head.pack(fill="x", padx=16, pady=(9, 2))
+        head.pack(fill="x", padx=16, pady=(10, 2))
+        tk.Label(head, text="●", bg=CARD, fg=color,
+                 font=(FAMILY, 9)).pack(side="left", padx=(0, 6))
         tk.Label(
             head, text=snap["title"], bg=CARD, fg=TEXT,
             font=(FAMILY, 11, "bold"),
         ).pack(side="left")
+
+        chips = tk.Frame(head, bg=CARD)
+        chips.pack(side="right")
+        self._chip(chips, "%d 个账号" % len(snap["rows"]),
+                   "#EEF3FF", ACCENT).pack(side="right")
+        self._chip(chips, "%d 条会话" % snap["total"],
+                   "#F1F3F6", MUTED).pack(side="right", padx=(0, 6))
+
+        sub = tk.Frame(card, bg=CARD)
+        sub.pack(fill="x", padx=16)
         if snap["current"]:
             current_text = "当前生效：%s" % snap["current_label"]
             current_fg = ACCENT
@@ -778,16 +851,7 @@ class App:
             current_text = "未发现当前账号"
             current_fg = MUTED
         tk.Label(
-            head, text=current_text, bg=CARD, fg=current_fg, font=(FAMILY, 9)
-        ).pack(side="right")
-
-        sub = tk.Frame(card, bg=CARD)
-        sub.pack(fill="x", padx=16)
-        tk.Label(
-            sub,
-            text="识别到 %d 个账号，共 %d 条会话"
-            % (len(snap["rows"]), snap["total"]),
-            bg=CARD, fg=MUTED, font=(FAMILY, 8),
+            sub, text=current_text, bg=CARD, fg=current_fg, font=(FAMILY, 9)
         ).pack(side="left")
 
         if not snap["available"]:
@@ -800,11 +864,17 @@ class App:
             return
 
         if not snap["rows"]:
-            tk.Label(
-                card,
-                text="还没有识别到账号。登录该软件并产生一次会话后会自动出现。",
-                bg=CARD, fg=MUTED, font=(FAMILY, 9), anchor="w",
-            ).pack(fill="x", padx=16, pady=(12, 14))
+            empty = tk.Frame(card, bg=CARD)
+            empty.pack(fill="x", padx=16, pady=(12, 14))
+            tk.Label(empty, text="○", bg=CARD, fg=FAINT,
+                     font=(FAMILY, 14)).pack(side="left", padx=(0, 10))
+            box = tk.Frame(empty, bg=CARD)
+            box.pack(side="left", fill="x", expand=True)
+            tk.Label(box, text="还没有识别到账号", bg=CARD, fg=TEXT,
+                     font=(FAMILY, 9, "bold"), anchor="w").pack(anchor="w")
+            tk.Label(box, text="登录该软件并产生一次会话后会自动出现。",
+                     bg=CARD, fg=MUTED, font=(FAMILY, 8), anchor="w").pack(
+                anchor="w", pady=(2, 0))
             return
 
         rows_box = tk.Frame(card, bg=CARD)
@@ -974,7 +1044,14 @@ class App:
         except Exception:
             visible = False
         if visible and not self._busy:
-            self.refresh()
+            try:
+                index = self.notebook.index(self.notebook.select())
+            except Exception:
+                index = 0
+            if index == 1:
+                self.usage.refresh()
+            else:
+                self.refresh()
 
     # ------------------------------------------------------------ 账号页动作
 

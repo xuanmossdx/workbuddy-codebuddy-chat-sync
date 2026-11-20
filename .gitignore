@@ -22,6 +22,7 @@ desktop.ini
 
 # 构建产物
 dist/
+build/
 
 # 运行时生成的账号与实例目录
 accounts/
@@ -29,6 +30,9 @@ instances/
 
 # 本地调研存档（含本机账号信息，不入库）
 2026-11-18/
+doc/
+tools/
+docs/archive/
 
 # 旧版本与本地备份
 *.bak-*

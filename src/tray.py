@@ -45,7 +45,7 @@ except ImportError:
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(0, _msg, "账号记录同步", 0x30)
+        ctypes.windll.user32.MessageBoxW(0, _msg, "WorkBuddy 工具台", 0x30)
     except Exception:
         pass
     sys.exit(1)
@@ -210,7 +210,7 @@ def build_menu():
 
 def _notify(icon, msg):
     try:
-        icon.notify(msg, "账号记录同步")
+        icon.notify(msg, "WorkBuddy 工具台")
     except Exception:
         pass
 
@@ -344,7 +344,7 @@ def already_running_hint():
             "请右键任务栏通知区域里的蓝色圆形图标，\n"
             "选择「打开管理窗口」。\n\n"
             "如果没直接看到图标，点一下那里的 ∧ 箭头展开。",
-            "账号记录同步",
+            "WorkBuddy 工具台",
             0x40,
         )
     except Exception:
@@ -387,7 +387,7 @@ def main():
     app = ui.App(root, icon_image=make_image(), auto_enabled=state["auto"])
 
     icon = pystray.Icon(
-        "workbuddy_codebuddy_chat_sync", make_image(), "账号记录同步", build_menu()
+        "workbuddy_codebuddy_chat_sync", make_image(), "WorkBuddy 工具台", build_menu()
     )
     app.on_minimized = lambda: _notify(
         icon, "程序仍在托盘运行，后台同步不受影响。"

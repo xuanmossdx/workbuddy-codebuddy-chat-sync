@@ -5,7 +5,7 @@ a = Analysis(
     ['src/tray.py'],
     pathex=['src'],
     binaries=[],
-    datas=[],
+    datas=[('src/usage_pricing.json', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
